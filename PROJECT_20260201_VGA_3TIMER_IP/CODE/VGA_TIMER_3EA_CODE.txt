@@ -1,0 +1,272 @@
+
+#include <stdio.h>
+#include <stdint.h>
+#include <xil_exception.h>
+#include <xil_types.h>
+#include <xintc_l.h>
+#include "platform.h"
+#include "xil_printf.h"
+#include "sleep.h"
+#include "xparameters.h"
+#include "xgpio.h"
+#include "xintc.h"
+
+XIntc intc;
+XGpio SW;
+XGpio LED;
+XGpio BTN;
+
+
+#define INTC_ADDR XPAR_MICROBLAZE_RISCV_0_AXI_INTC_BASEADDR
+
+#define BTN_VEC_ID XPAR_FABRIC_AXI_GPIO_0_INTR
+#define FINISH_VEC_ID 2
+
+#define VGA_ADDR XPAR_MYIP_VGA_CON_0_BASEADDR
+
+// gpio 0 
+// ch 1 btn ch 2 led
+#define BTN_ADDR XPAR_XGPIO_0_BASEADDR
+#define LED_ADDR XPAR_XGPIO_0_BASEADDR
+#define BTN_CH 1
+#define LED_CH 2
+// gpio 1
+// ch 1 sw 16
+#define SW_ADDR XPAR_AXI_GPIO_1_BASEADDR
+#define SW_CH 1
+
+#define FND_CNT_ADDR XPAR_MYIP_FND_CNTR_0_BASEADDR
+
+#define WATCH_ADDR XPAR_MYIP_WATCH_TIMER_0_BASEADDR
+#define STOP_ADDR XPAR_MYIP_STOP_WATCH_1_0_BASEADDR
+#define COOK_ADDR XPAR_MYIP_GOOK_TIMER_0_BASEADDR
+
+void BTN_Handler(void *CallBackRef);
+void FINISH_Handler(void *CallBackRef);
+
+uint16_t BTN_FLAG, ALARM_FLAG = 0;
+uint32_t TEMP_NUM;
+int main()
+{   
+    init_platform();
+
+    print("start\n\r");
+
+    unsigned *VGA_DEVICE = (unsigned *)VGA_ADDR;
+    unsigned *FND_DEVICE = (unsigned *)FND_CNT_ADDR;
+    unsigned *COOK_DEVICE = (unsigned *)COOK_ADDR;
+    unsigned *STOP_DEVICE = (unsigned *)STOP_ADDR;
+    unsigned *WATCH_DEVICE = (unsigned *)WATCH_ADDR;
+
+    
+    
+    XGpio_Initialize(&SW, SW_ADDR);
+    XGpio_Initialize(&LED, LED_ADDR);
+    XGpio_Initialize(&BTN, BTN_ADDR);
+
+    XGpio_SetDataDirection(&SW, SW_CH, 0xFFFF);
+    XGpio_SetDataDirection(&BTN, BTN_CH, 0xFFFF);
+    XGpio_SetDataDirection(&LED, LED_CH, 0x0000);
+    
+    XIntc_Initialize(&intc, INTC_ADDR);
+
+    XIntc_Connect(&intc, BTN_VEC_ID, BTN_Handler, (void *)&BTN);
+    XIntc_Connect(&intc, FINISH_VEC_ID, FINISH_Handler, (void *)0);
+
+    XIntc_Start(&intc, XIN_REAL_MODE);
+
+    XIntc_Enable(&intc, BTN_VEC_ID);
+    XIntc_Enable(&intc, FINISH_VEC_ID);
+
+    Xil_ExceptionInit();
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT, 
+        (Xil_ExceptionHandler)XIntc_InterruptHandler, (void*)&intc);
+    Xil_ExceptionEnable();
+
+    XGpio_InterruptEnable(&BTN, BTN_CH);
+    XGpio_InterruptGlobalEnable(&BTN);
+
+
+
+    uint32_t BTN_DATA, SW_DATA, LED_DATA;
+    uint32_t temp_fnd = 0;
+
+    // SW_ DATA = 1 2 4 
+    // WATCH 
+    // STOP
+    // TIMER
+    
+    //FND_[0] = 숫자
+    //FND_[1] = 1 >16 0> 10
+    FND_DEVICE[1] = 1;
+
+    while (1) {
+            if(BTN_FLAG == 1){
+            SW_DATA = XGpio_DiscreteRead(&SW, SW_CH);
+            BTN_FLAG = 0;
+            usleep(50000);
+            BTN_DATA = XGpio_DiscreteRead(&BTN, BTN_CH);
+            if(BTN_DATA == 1){
+                if(SW_DATA == 4){   // TIMER // START
+                    // COOK_DEVICE[2] = COOK_DEVICE[2] | 0b01;
+                    // COOK_DEVICE[2] = COOK_DEVICE[2] & 0b10;
+                    COOK_DEVICE[2] = 0x01;
+                    COOK_DEVICE[2] = 0X00;
+                    printf("cook_start\n");
+                }
+                else if(SW_DATA == 2){  // stop
+                    STOP_DEVICE[0] = STOP_DEVICE[0] |0b001;
+                    STOP_DEVICE[0] = STOP_DEVICE[0] &0b110;
+                    printf("stop_start\n");
+                }
+                else{   // WATCH
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] | 0b001;
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] & 0b110;
+                    printf("watch_start\n");
+                }        
+            }
+            else if(BTN_DATA == 2){
+                if(SW_DATA == 4){   // TIMER  // min up
+                    if(COOK_DEVICE[1] == 59) COOK_DEVICE[1] = 0;
+                    else COOK_DEVICE[1]++;
+                    printf("cook_minup\n");
+                }
+                else if(SW_DATA == 2){  // stop
+                    STOP_DEVICE[0] = STOP_DEVICE[0] |0b010;
+                    STOP_DEVICE[0] = STOP_DEVICE[0] &0b101;
+                    printf("stop_lap\n");
+                }
+                else{   // WATCH
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] | 0b010;
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] & 0b101;
+                    printf("watch sec up\n");
+                }        
+            }
+            else if(BTN_DATA == 4){
+                if(SW_DATA == 4){   // TIMER // SEC UP
+                    // COOK_DEVICE[0] = 5;
+                    printf("cook_sec up\n");
+                    if(COOK_DEVICE[0] == 59){
+                        if(COOK_DEVICE[1] != 59) COOK_DEVICE[1]++;
+                        else COOK_DEVICE[1] = 0;
+                        COOK_DEVICE[0] = 0;
+                    }
+                    else COOK_DEVICE[0]++;
+                }
+                else if(SW_DATA == 2){  // sti
+                    STOP_DEVICE[0] = STOP_DEVICE[0] |0b100;
+                    STOP_DEVICE[0] = STOP_DEVICE[0] &0b011;
+                    printf("stop_clear\n");
+                }
+                else{   // WATCH
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] | 0b100;
+                    WATCH_DEVICE[0] = WATCH_DEVICE[0] & 0b011;
+                    printf("watch min up\n");
+                }        
+            }
+            else if(BTN_DATA == 8){  
+                 // TIMER // off
+                    COOK_DEVICE[2] = 0b10;
+                    COOK_DEVICE[2] = 0b00;
+                    printf("cook_off\n");
+            
+            }
+        }
+        SW_DATA = XGpio_DiscreteRead(&SW, SW_CH);
+
+        if(SW_DATA == 4){   // TIMER
+            if(COOK_DEVICE[5] == 1){
+                temp_fnd = COOK_DEVICE[4] * 100 + COOK_DEVICE[3];   // 동작하는중
+                FND_DEVICE[0] = ((temp_fnd / 1000) << 12) +
+                                ((temp_fnd % 1000 / 100) <<8) +
+                                ((temp_fnd % 100 / 10 ) << 4) +
+                                ((temp_fnd % 10));
+            }
+            else{
+                temp_fnd = COOK_DEVICE[1] * 100  + COOK_DEVICE [0]; //설정중
+                FND_DEVICE[0] = ((temp_fnd / 1000) << 12) +
+                                ((temp_fnd % 1000 / 100) <<8) +
+                                ((temp_fnd % 100 / 10 ) << 4) +
+                                ((temp_fnd % 10));
+            }
+        }
+        else if(SW_DATA == 2){  // STOP
+            temp_fnd = STOP_DEVICE[3] * 100 + STOP_DEVICE[4];
+            FND_DEVICE[0] = ((temp_fnd / 1000) << 12) +
+                                ((temp_fnd % 1000 / 100) <<8) +
+                                ((temp_fnd % 100 / 10 ) << 4) +
+                                ((temp_fnd % 10));
+        }
+        else{   // WATCH
+            temp_fnd = WATCH_DEVICE[2] * 100 + WATCH_DEVICE[1];
+            FND_DEVICE[0] = ((temp_fnd / 1000) << 12) +
+                                ((temp_fnd % 1000 / 100) <<8) +
+                                ((temp_fnd % 100 / 10 ) << 4) +
+                                ((temp_fnd % 10));
+        }
+        // printf("timer %d | %d |\n", COOK_DEVICE[4], COOK_DEVICE[3]);
+        // printf("stop %d | %d |\n", STOP_DEVICE[4], STOP_DEVICE[3]);
+        // printf("watch %d | %d |\n", WATCH_DEVICE[2], WATCH_DEVICE[1]);
+        //printf("sw %d\n",SW_DATA);
+        
+        // WATCH
+        TEMP_NUM = WATCH_DEVICE[2] * 100 + WATCH_DEVICE[1];
+        VGA_DEVICE[0] = ((TEMP_NUM / 1000 + 48 ) << 24)         |   // 48 == '0'
+                        ((TEMP_NUM % 1000 / 100 + 48 ) << 16)   |
+                        ((TEMP_NUM % 100 / 10 + 48) << 8)       |
+                        ((TEMP_NUM % 10) + 48);
+
+        // STOP
+        TEMP_NUM = STOP_DEVICE[3] * 100 + STOP_DEVICE[4];
+        VGA_DEVICE[1] = ((TEMP_NUM / 1000 + 48 ) << 24)         |   // 48 == '0'
+                        ((TEMP_NUM % 1000 / 100 + 48 ) << 16)   |
+                        ((TEMP_NUM % 100 / 10 + 48) << 8)       |
+                        ((TEMP_NUM % 10) + 48);
+
+        // TIMER
+            
+        if(COOK_DEVICE[5] == 1){
+            TEMP_NUM = COOK_DEVICE[4] * 100 + COOK_DEVICE[3];   // 동작하는중
+            VGA_DEVICE[2] = ((TEMP_NUM / 1000 + 48 ) << 24)         |   // 48 == '0'
+                    ((TEMP_NUM % 1000 / 100 + 48 ) << 16)   |
+                    ((TEMP_NUM % 100 / 10 + 48) << 8)       |
+                    ((TEMP_NUM % 10) + 48);
+        }
+        else{
+            TEMP_NUM = COOK_DEVICE[1] * 100  + COOK_DEVICE [0]; //설정중
+            VGA_DEVICE[2] = ((TEMP_NUM / 1000 + 48 ) << 24)         |   // 48 == '0'
+                    ((TEMP_NUM % 1000 / 100 + 48 ) << 16)   |
+                    ((TEMP_NUM % 100 / 10 + 48) << 8)       |
+                    ((TEMP_NUM % 10) + 48);
+        }
+
+        ALARM_FLAG = COOK_DEVICE[6]; // 알람 감시
+        if(ALARM_FLAG == 1) VGA_DEVICE[3] = 1;
+        else VGA_DEVICE[3] = 0;
+
+        if(SW_DATA == 2) {
+            LED_DATA = temp_fnd;
+        }
+        XGpio_DiscreteWrite(&LED, LED_CH, LED_DATA);
+
+        usleep(50000);
+    }
+    cleanup_platform();
+    return 0;
+}
+
+void BTN_Handler(void *CallBackRef){
+    // XGpio *gpio_ptr = (XGpio*)CallBackRef;
+    BTN_FLAG = 1;
+    print("BTN_IN!\n");
+    XGpio_InterruptClear(CallBackRef, BTN_CH);
+    return;
+}
+
+
+void FINISH_Handler(void *CallBackRef){
+
+    print("Timer Finish Interrupt!\n");
+    return;
+
+}
